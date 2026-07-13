@@ -122,6 +122,16 @@ h2{font-size:15px;font-weight:500;color:var(--ink);margin:14px 0 4px}
 .metricname span{font-size:10.5px;color:var(--mut)}
 .biogrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}
 .fileline{font-size:11px;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:240px}
+.aibox{margin-top:12px;border-left:3px solid var(--clay);border-radius:0 10px 10px 0}
+.aistatus{font-size:12px;color:var(--ink2);display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.aibar{height:6px;background:#F1EFE8;border-radius:99px;overflow:hidden;margin-top:10px}
+.aibar span{display:block;height:100%;width:0;background:var(--clay);transition:width .2s}
+.aiinsight{background:var(--card);border:.5px solid var(--line);border-radius:10px;padding:12px 14px}
+.aiinsight .top{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px}
+.aiinsight .top b{font-size:13px;font-weight:500;color:var(--ink)}
+.aiinsight p{font-size:12.5px;color:var(--ink2);line-height:1.5;margin:0}
+.aiinsight .act{font-size:12.5px;color:var(--clay-ink);margin-top:8px;display:flex;gap:6px}
+.aiinsight .ev{font-size:10.5px;color:var(--mut);margin-top:7px}
 table{width:100%;border-collapse:collapse;font-size:13px}
 th,td{text-align:left;padding:8px 8px;border-bottom:.5px solid #EDE6D9}
 th{color:var(--mut);font-weight:500;font-size:11.5px}
@@ -446,8 +456,24 @@ const LOCAL_PROFILE='vitals.profileDraft.v1';
 const LOCAL_BODY='vitals.bodyMeasurements.v1';
 const LOCAL_REPORTS='vitals.healthReports.v1';
 const LOCAL_BIOMARKERS='vitals.biomarkerObservations.v1';
+const LOCAL_AI_INSIGHTS='vitals.localAiInsights.v1';
 let currentPayload=null, currentSource='apple', currentDailySummaries=[];
 let pendingReport=null;
+const WEBLLM_IMPORT_URL='https://esm.run/@mlc-ai/web-llm';
+const WEBLLM_MODELS=[
+  {id:'Qwen2.5-1.5B-Instruct-q4f16_1-MLC',label:'Balanced local model'},
+  {id:'Qwen2.5-0.5B-Instruct-q4f16_1-MLC',label:'Fastest local model'},
+  {id:'Phi-3.5-mini-instruct-q4f16_1-MLC-1k',label:'Larger local model'}
+];
+let webllmEngine=null, webllmModel=localStorage.getItem('vitals.webllmModel.v1')||WEBLLM_MODELS[0].id;
+const aiState={
+  status:'not_started',
+  progress:0,
+  message:'Local AI is off until you generate insights.',
+  error:null,
+  insights:loadLocalAiInsights(),
+  fingerprint:null
+};
 const account={
   session:null,
   profile:loadLocalProfile(),
@@ -468,6 +494,8 @@ function loadLocalReports(){ return safeJson(localStorage.getItem(LOCAL_REPORTS)
 function saveLocalReports(rows){ localStorage.setItem(LOCAL_REPORTS,JSON.stringify(rows||[])); }
 function loadLocalBiomarkers(){ return safeJson(localStorage.getItem(LOCAL_BIOMARKERS),[]); }
 function saveLocalBiomarkers(rows){ localStorage.setItem(LOCAL_BIOMARKERS,JSON.stringify(rows||[])); }
+function loadLocalAiInsights(){ return safeJson(localStorage.getItem(LOCAL_AI_INSIGHTS),null); }
+function saveLocalAiInsights(pack){ localStorage.setItem(LOCAL_AI_INSIGHTS,JSON.stringify(pack||{})); aiState.insights=pack; }
 function activeProfile(){ return account.profile || {unit_system:'metric',height_cm:null}; }
 function activeBody(){ return (account.bodyMeasurements||[]).slice().sort((a,b)=>a.measured_on.localeCompare(b.measured_on)); }
 function activeReports(){ return (account.healthReports||[]).slice().sort((a,b)=>(a.report_date||'').localeCompare(b.report_date||'')); }
@@ -1198,6 +1226,243 @@ function bioFlagPill(flag){
   const f=flag||'unknown', cls=f==='normal'?'p-calm':(f==='high'||f==='low'?'p-elev':'p-neu');
   return `<span class="pill ${cls}">${esc(f)}</span>`;
 }
+function stableHash(input){
+  const s=JSON.stringify(input), len=s.length;
+  let h=2166136261;
+  for(let i=0;i<len;i++){ h^=s.charCodeAt(i); h+=(h<<1)+(h<<4)+(h<<7)+(h<<8)+(h<<24); }
+  return (h>>>0).toString(16);
+}
+function bodySnapshot(){
+  const p=activeProfile(), rows=activeBody(), latest=rows[rows.length-1];
+  const latestBmi=latest?bmi(+latest.weight_kg,+p.height_cm):null;
+  return {
+    entries:rows.length,
+    latest_weight_kg:latest?+(+latest.weight_kg).toFixed(1):null,
+    latest_weight_date:latest?latest.measured_on:null,
+    bmi:latestBmi,
+    bmi_label:bmiLabel(latestBmi),
+    weight_delta_30d:trend(rows,30),
+    weight_delta_90d:trend(rows,90),
+    recent:rows.slice(-6).map(r=>({date:r.measured_on,weight_kg:+r.weight_kg}))
+  };
+}
+function buildHealthInsightPack(){
+  const biomarkerGroups=biomarkerSummaries(activeBiomarkers());
+  return {
+    generated_on:new Date().toISOString().slice(0,10),
+    profile:{unit_system:(activeProfile().unit_system||'metric'),height_cm:activeProfile().height_cm||null},
+    body:bodySnapshot(),
+    biomarkers:biomarkerGroups.slice(0,24).map(s=>({
+      key:s.key,
+      name:s.name,
+      latest:+s.latest.value,
+      latest_date:s.latest.observed_on,
+      unit:s.latest.unit||null,
+      previous:s.prev?+s.prev.value:null,
+      previous_date:s.prev?s.prev.observed_on:null,
+      delta:s.delta,
+      flag:s.latest.flag||'unknown',
+      reference_range:bioRangeText(s.latest),
+      result_count:s.rows.length
+    }))
+  };
+}
+function insightFingerprint(){
+  const pack=buildHealthInsightPack();
+  return stableHash({
+    profile:pack.profile,
+    body:pack.body,
+    biomarkers:pack.biomarkers.map(b=>({key:b.key,latest:b.latest,latest_date:b.latest_date,previous:b.previous,delta:b.delta,flag:b.flag,range:b.reference_range}))
+  });
+}
+function buildDeterministicFindings(pack){
+  const findings=[];
+  const body=pack.body||{};
+  if(body.entries>=2 && body.weight_delta_90d!=null && Math.abs(body.weight_delta_90d)>=3){
+    findings.push({
+      priority:Math.abs(body.weight_delta_90d)>=6?'high':'medium',
+      topic:'Body trend',
+      finding:`Weight changed ${body.weight_delta_90d>0?'+':''}${body.weight_delta_90d} kg over the 90-day window.`,
+      evidence:[`Latest weight ${body.latest_weight_kg} kg on ${body.latest_weight_date}`, `90-day change ${body.weight_delta_90d} kg`],
+      action:'Review the trend alongside sleep, steps, training, and recent routine changes.'
+    });
+  }
+  if(body.bmi!=null && (body.bmi<18.5 || body.bmi>=25)){
+    findings.push({
+      priority:body.bmi>=30?'high':'medium',
+      topic:'BMI',
+      finding:`BMI is ${body.bmi}, labeled ${body.bmi_label}.`,
+      evidence:[`BMI ${body.bmi}`, `Latest weight ${body.latest_weight_kg} kg`],
+      action:'Use this as rough context, not a diagnosis, and track the direction over time.'
+    });
+  }
+  (pack.biomarkers||[]).forEach(b=>{
+    if(b.flag==='high'||b.flag==='low'){
+      findings.push({
+        priority:'high',
+        topic:b.name,
+        finding:`${b.name} is marked ${b.flag} at ${b.latest} ${b.unit||''}.`.trim(),
+        evidence:[`${b.name} ${b.latest} ${b.unit||''} on ${b.latest_date}`.trim(), `Reference ${b.reference_range}`],
+        action:'Discuss this result and the reference range with a clinician.'
+      });
+    } else if(b.delta!=null && Math.abs(b.delta)>0){
+      const rel=b.previous?Math.abs(b.delta)/Math.max(Math.abs(b.previous),1):0;
+      if(rel>=0.15){
+        findings.push({
+          priority:'medium',
+          topic:b.name,
+          finding:`${b.name} changed ${b.delta>0?'+':''}${b.delta} ${b.unit||''} since the previous report.`.trim(),
+          evidence:[`${b.name} ${b.previous} → ${b.latest} ${b.unit||''}`.trim(), `${b.previous_date||'previous'} to ${b.latest_date}`],
+          action:'Watch whether this continues on the next report.'
+        });
+      }
+    }
+  });
+  return findings.slice(0,12);
+}
+function fallbackInsightCards(findings, pack){
+  if(!findings.length && ((pack.body&&pack.body.entries)||0 || (pack.biomarkers||[]).length)){
+    return [{priority:'low',title:'Your tracked values are building a useful baseline',summary:'There is not enough concerning movement in the saved body and biomarker data to rank a major lever yet.',evidence:['No high-priority deterministic findings from the current saved values.'],action:'Upload the next report or keep adding body entries so trend quality improves.',confidence:'medium'}];
+  }
+  return findings.slice(0,4).map(f=>({priority:f.priority,title:f.topic,summary:f.finding,evidence:f.evidence,action:f.action,confidence:'medium'}));
+}
+function localAiSupport(){
+  if(!window.isSecureContext) return {supported:false,reason:'Local AI needs HTTPS or localhost.'};
+  if(!navigator.gpu) return {supported:false,reason:'This browser does not expose WebGPU.'};
+  return {supported:true,reason:'ok'};
+}
+function extractJsonObject(text){
+  const raw=String(text||'').trim();
+  try{ return JSON.parse(raw); }catch(_){}
+  const start=raw.indexOf('{'), end=raw.lastIndexOf('}');
+  if(start!==-1&&end>start){ try{ return JSON.parse(raw.slice(start,end+1)); }catch(_){} }
+  return null;
+}
+function validateAiInsights(raw, findings, pack){
+  const obj=typeof raw==='string'?extractJsonObject(raw):raw;
+  const input=Array.isArray(obj)?obj:(obj&&obj.insights);
+  if(!Array.isArray(input)) return fallbackInsightCards(findings,pack);
+  const cleaned=input.map(i=>({
+    priority:['high','medium','low'].includes(i.priority)?i.priority:'medium',
+    title:String(i.title||i.headline||'Health trend').slice(0,90),
+    summary:String(i.summary||i.finding||'').slice(0,260),
+    evidence:Array.isArray(i.evidence)?i.evidence.map(e=>String(e).slice(0,120)).filter(Boolean).slice(0,3):[],
+    action:String(i.action||'Review this trend with the rest of your health context.').slice(0,180),
+    confidence:['high','medium','low'].includes(i.confidence)?i.confidence:'medium'
+  })).filter(i=>i.title&&i.summary&&i.evidence.length).slice(0,4);
+  return cleaned.length?cleaned:fallbackInsightCards(findings,pack);
+}
+function setAiState(next){
+  Object.assign(aiState,next);
+  const el=$('aiInsightsBox');
+  if(el) el.outerHTML=aiInsightsHtml(currentPayload||blankPayload());
+  setupAiInsightsUi();
+}
+async function loadWebLLMEngine(){
+  const support=localAiSupport();
+  if(!support.supported) throw new Error(support.reason);
+  if(webllmEngine && aiState.model===webllmModel) return webllmEngine;
+  setAiState({status:'model_loading',progress:0,message:'Loading WebLLM runtime…',error:null,model:webllmModel});
+  const webllm=await import(WEBLLM_IMPORT_URL);
+  const engine=new webllm.MLCEngine({
+    initProgressCallback:(p)=>{
+      const progress=Math.round(((p&&p.progress)||0)*100);
+      setAiState({status:progress>=100?'model_loading':'model_downloading',progress,message:(p&&p.text)||'Downloading local model…',error:null,model:webllmModel});
+    }
+  });
+  await engine.reload(webllmModel);
+  webllmEngine=engine;
+  setAiState({status:'ready',progress:100,message:'Local model is ready.',error:null,model:webllmModel});
+  return engine;
+}
+function buildInsightPrompt(pack, findings){
+  return [
+    {role:'system',content:'You are a cautious wellness trend explainer inside a personal health dashboard. You are not a doctor. Use only the provided evidence. Do not diagnose. Do not recommend medication, supplements, dosing, or treatment. Do not invent missing demographics, symptoms, conditions, or reference ranges. Every insight must cite evidence from the input. Return only compact JSON.'},
+    {role:'user',content:JSON.stringify({
+      task:'Create 2 to 4 actionable wellness insight cards from confirmed body and biomarker data.',
+      output_schema:{insights:[{priority:'high|medium|low',title:'short title',summary:'one grounded trend explanation',evidence:['exact values from input'],action:'safe next step',confidence:'high|medium|low'}]},
+      safety:'For abnormal biomarkers, say to discuss with a clinician. Avoid diagnosis and treatment claims.',
+      health_data:pack,
+      deterministic_findings:findings
+    })}
+  ];
+}
+function aiStatusLabel(status){
+  return {
+    unsupported_browser:'Unavailable',
+    not_started:'Not generated',
+    model_downloading:'Downloading',
+    model_loading:'Loading',
+    ready:'Ready',
+    generating:'Generating',
+    complete:'Updated',
+    stale:'Stale',
+    failed:'Fallback'
+  }[status]||'Local AI';
+}
+function aiPriorityPill(priority){
+  const cls=priority==='high'?'p-elev':(priority==='medium'?'p-watch':'p-neu');
+  return `<span class="pill ${cls}">${esc(priority||'medium')}</span>`;
+}
+function aiInsightsHtml(){
+  const support=localAiSupport(), pack=buildHealthInsightPack(), fingerprint=insightFingerprint();
+  const cached=aiState.insights, hasData=!!(pack.body.entries||pack.biomarkers.length);
+  const stale=!!(cached&&cached.fingerprint&&cached.fingerprint!==fingerprint);
+  const insights=cached&&Array.isArray(cached.insights)?cached.insights:[];
+  const status=!support.supported?'unsupported_browser':(stale?'stale':aiState.status);
+  const note=!support.supported?support.reason:(stale?'Data changed since these insights were generated.':(aiState.message||'Local AI is off until you generate insights.'));
+  const insightHtml=insights.length?`<div class="grid g2" style="margin-top:12px">${insights.map(i=>`<div class="aiinsight">
+    <div class="top"><b>${esc(i.title)}</b>${aiPriorityPill(i.priority)}</div>
+    <p>${esc(i.summary)}</p>
+    <div class="act"><i class="ti ti-arrow-right" style="font-size:14px;margin-top:1px"></i><span>${esc(i.action)}</span></div>
+    <div class="ev">${(i.evidence||[]).map(e=>esc(e)).join(' · ')} · ${esc(i.confidence||'medium')} confidence</div>
+  </div>`).join('')}</div>`:`<div class="callout"><i class="ti ti-sparkles ic"></i><b>Local AI insights are optional.</b> Generate them after saving body entries or biomarkers.</div>`;
+  return `<div class="card aibox" id="aiInsightsBox">
+    <div class="ctitle">Local AI insights</div>
+    <div class="cnote">Runs in this browser with WebLLM. Confirmed values are summarized locally; raw PDFs are not sent anywhere.</div>
+    <div class="minirow" style="justify-content:space-between;align-items:flex-end">
+      <div class="aistatus"><span class="pill ${status==='complete'&&!stale?'p-calm':status==='failed'||status==='unsupported_browser'?'p-elev':status==='stale'?'p-watch':'p-neu'}">${esc(aiStatusLabel(status))}</span><span>${esc(note)}</span></div>
+      <div class="minirow">
+        <select class="input compact" id="webllmModel" style="width:210px">${WEBLLM_MODELS.map(m=>`<option value="${m.id}">${esc(m.label)}</option>`).join('')}</select>
+        <button class="btn" id="generateAiInsights" type="button" ${hasData&&support.supported?'':'disabled'}><i class="ti ti-sparkles" style="font-size:14px"></i> ${cached?'Refresh':'Generate'}</button>
+        ${cached?'<button class="btn ghost" id="clearAiInsights" type="button"><i class="ti ti-trash" style="font-size:14px"></i> Clear</button>':''}
+      </div>
+    </div>
+    ${(aiState.status==='model_downloading'||aiState.status==='model_loading'||aiState.status==='generating')?`<div class="aibar"><span style="width:${Math.max(4,aiState.progress||0)}%"></span></div>`:''}
+    ${aiState.error?`<div class="err" style="text-align:left;margin-top:10px">${esc(aiState.error)}</div>`:''}
+    ${insightHtml}
+  </div>`;
+}
+function setupAiInsightsUi(){
+  const model=$('webllmModel');
+  if(model){ model.value=webllmModel; model.onchange=()=>{ webllmModel=model.value; localStorage.setItem('vitals.webllmModel.v1',webllmModel); webllmEngine=null; setAiState({status:'not_started',message:'Model changed. Generate again when ready.',error:null,model:webllmModel}); }; }
+  const gen=$('generateAiInsights'); if(gen) gen.onclick=()=>generateLocalAiInsights();
+  const clear=$('clearAiInsights'); if(clear) clear.onclick=()=>{ localStorage.removeItem(LOCAL_AI_INSIGHTS); aiState.insights=null; setAiState({status:'not_started',message:'Local insights cleared.',error:null,progress:0}); };
+}
+async function generateLocalAiInsights(){
+  const pack=buildHealthInsightPack(), findings=buildDeterministicFindings(pack), fingerprint=insightFingerprint();
+  if(!pack.body.entries && !pack.biomarkers.length){ setAiState({status:'failed',message:'Add body entries or biomarkers before generating insights.',error:'No saved body or biomarker data yet.'}); return; }
+  try{
+    setAiState({status:'generating',progress:100,message:'Preparing local evidence pack…',error:null,fingerprint});
+    const engine=await loadWebLLMEngine();
+    setAiState({status:'generating',progress:100,message:'Generating private local insights…',error:null,fingerprint});
+    const reply=await engine.chat.completions.create({
+      messages:buildInsightPrompt(pack,findings),
+      temperature:0.2,
+      max_tokens:700,
+      response_format:{type:'json_object'}
+    });
+    const content=(reply&&reply.choices&&reply.choices[0]&&reply.choices[0].message&&reply.choices[0].message.content)||'';
+    const insights=validateAiInsights(content,findings,pack);
+    const saved={fingerprint,generated_at:new Date().toISOString(),model:webllmModel,insights};
+    saveLocalAiInsights(saved);
+    setAiState({status:'complete',progress:100,message:'Insights updated locally.',error:null,insights:saved,fingerprint});
+  }catch(err){
+    const fallback={fingerprint,generated_at:new Date().toISOString(),model:'deterministic-fallback',insights:fallbackInsightCards(findings,pack)};
+    saveLocalAiInsights(fallback);
+    setAiState({status:'failed',progress:0,message:'WebLLM could not run, so deterministic insights are shown.',error:err.message||String(err),insights:fallback,fingerprint});
+  }
+}
 function reportReviewHtml(){
   if(!pendingReport) return '';
   const rows=pendingReport.observations||[];
@@ -1235,6 +1500,7 @@ function reportsSectionHtml(){
       <button class="btn" id="reportUploadInSection" type="button"><i class="ti ti-file-upload" style="font-size:14px"></i> Upload PDF</button>
     </div>
     ${reportReviewHtml()}
+    ${aiInsightsHtml()}
     ${cards?`<div class="grid g4" style="margin-top:12px">${cards}</div>`:''}
     ${trendCards?`<div class="biogrid" style="margin-top:12px">${trendCards}</div>`:''}
     <div class="grid g2" style="margin-top:12px">
@@ -1255,6 +1521,7 @@ function setupReportsUi(){
   }
   biomarkerTable(); reportTable();
   biomarkerSummaries(activeBiomarkers()).filter(s=>s.rows.length>=2).slice(0,6).forEach(s=>biomarkerTrendChart('bio_'+s.key,s));
+  setupAiInsightsUi();
 }
 async function savePendingReport(){
   if(!pendingReport) return;
