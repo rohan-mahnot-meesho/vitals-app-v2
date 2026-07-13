@@ -139,7 +139,7 @@ async function upsertDailySummaries(source, summaries) {
 }
 
 async function createHealthReport(report, observations) {
-  if (!observations.length) return null;
+  if (!observations.length) throw new Error('No biomarker values were selected for this report.');
   const client = requireClient();
   const { data: userData, error: userError } = await client.auth.getUser();
   if (userError) throw userError;
@@ -173,8 +173,10 @@ async function createHealthReport(report, observations) {
     source_text: row.source_text || null,
   }));
   const { data, error } = await client.from('biomarker_observations').insert(rows).select('*');
-  if (error) throw error;
-  return { report: insertedReport, observations: data || [] };
+  if (error) {
+    await client.from('health_reports').delete().eq('id', insertedReport.id);
+    throw error;
+  }
 }
 
 window.VitalsCloud = {
