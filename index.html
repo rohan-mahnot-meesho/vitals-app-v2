@@ -503,7 +503,12 @@ function activeBiomarkers(){ return (account.biomarkers||[]).slice().sort((a,b)=
 function cloud(){ return window.VitalsCloud; }
 function hasCloud(){ return !!(cloud()&&cloud().enabled); }
 function userLabel(){ const u=account.session&&account.session.user; return u?(u.user_metadata&&u.user_metadata.full_name)||u.email||'Signed in':null; }
-function setStatus(msg){ const el=$('err'); if(el&&msg) el.textContent=msg; }
+function setStatus(msg){
+  const el=$('err'); if(el&&msg) el.textContent=msg;
+  if(msg && $('dashView') && !$('dashView').classList.contains('hidden') && $('range')){
+    $('range').innerHTML='<i class="ti ti-alert-circle" style="font-size:13px"></i> '+esc(msg);
+  }
+}
 function esc(v){ return String(v==null?'':v).replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
 
 function kgFromInput(v,unit){ const n=+v; if(!(n>0)) return null; return unit==='imperial'?n*0.45359237:n; }
@@ -627,9 +632,14 @@ const BIOMARKERS=[
   {key:'ggt',name:'GGT',aliases:['gamma gt','gamma glutamyl transferase','ggt'],unit:'U/L'},
   {key:'alkaline_phosphatase',name:'Alkaline phosphatase',aliases:['alkaline phosphatase','alp'],unit:'U/L'},
   {key:'bilirubin_total',name:'Total bilirubin',aliases:['total bilirubin','bilirubin total'],unit:'mg/dL'},
+  {key:'protein_total',name:'Total protein',aliases:['total protein','protein total'],unit:'g/dL'},
+  {key:'albumin',name:'Albumin',aliases:['albumin'],unit:'g/dL'},
+  {key:'globulin',name:'Globulin',aliases:['globulin'],unit:'g/dL'},
+  {key:'albumin_globulin_ratio',name:'A/G ratio',aliases:['a/g ratio','albumin globulin ratio','a g ratio'],unit:''},
   {key:'creatinine',name:'Creatinine',aliases:['creatinine'],unit:'mg/dL'},
   {key:'egfr',name:'eGFR',aliases:['egfr','estimated gfr'],unit:'mL/min/1.73m2'},
   {key:'bun',name:'BUN',aliases:['blood urea nitrogen','bun','urea nitrogen'],unit:'mg/dL'},
+  {key:'urea',name:'Urea',aliases:['urea'],unit:'mg/dL'},
   {key:'uric_acid',name:'Uric acid',aliases:['uric acid'],unit:'mg/dL'},
   {key:'hemoglobin',name:'Hemoglobin',aliases:['hemoglobin','hb'],unit:'g/dL'},
   {key:'hematocrit',name:'Hematocrit',aliases:['hematocrit','hct'],unit:'%'},
