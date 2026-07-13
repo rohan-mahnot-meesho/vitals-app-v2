@@ -127,9 +127,21 @@ Sentence case, contractions, verb-first buttons ("New upload", not "Upload File"
 
 Single-page console. Nav items scroll to in-page sections rather than loading pages (keeps it fast and simple for v1):
 
-`Overview` · `Distributions` · `Trends` · `Training` · `Correlations` — plus `New upload` under a "Data" group.
+`Overview` · `Distributions` · `Trends` · `Training` · `Correlations` · `Body` · `Reports` — plus `New upload` under a "Data" group.
 
 `Overview` leads with the Inter headline + the four state-colored metric tiles + coverage + the single top insight. Everything else is drill-down below.
+
+## 7. Health Reports
+
+The Reports surface follows the same console pattern as Body:
+
+- A compact PDF upload row, not a marketing-style panel.
+- A review table before save. Extracted values are editable because report PDFs vary by lab and OCR can be imperfect.
+- Metric tiles show the latest confirmed biomarkers with state pills.
+- Trend charts appear only after at least two observations exist for a biomarker.
+- Report history and biomarker history are shown as quiet tables.
+
+Raw PDFs stay client-side. Persist only report metadata and confirmed biomarker observations.
 
 ---
 

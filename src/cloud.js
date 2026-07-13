@@ -72,18 +72,22 @@ async function ensureProfile(user) {
 async function loadAccountData(user) {
   const client = requireClient();
   await ensureProfile(user);
-  const [profileRes, bodyRes, summariesRes] = await Promise.all([
+  const [profileRes, bodyRes, summariesRes, reportsRes, biomarkersRes] = await Promise.all([
     client.from('profiles').select('*').eq('user_id', user.id).maybeSingle(),
     client.from('body_measurements').select('*').eq('user_id', user.id).order('measured_on', { ascending: true }),
     client.from('daily_health_summaries').select('*').eq('user_id', user.id).order('summary_date', { ascending: true }),
+    client.from('health_reports').select('*').eq('user_id', user.id).order('report_date', { ascending: true }),
+    client.from('biomarker_observations').select('*').eq('user_id', user.id).order('observed_on', { ascending: true }),
   ]);
-  for (const res of [profileRes, bodyRes, summariesRes]) {
+  for (const res of [profileRes, bodyRes, summariesRes, reportsRes, biomarkersRes]) {
     if (res.error) throw res.error;
   }
   return {
     profile: profileRes.data || null,
     bodyMeasurements: bodyRes.data || [],
     dailySummaries: summariesRes.data || [],
+    healthReports: reportsRes.data || [],
+    biomarkers: biomarkersRes.data || [],
   };
 }
 
@@ -134,6 +138,45 @@ async function upsertDailySummaries(source, summaries) {
   if (error) throw error;
 }
 
+async function createHealthReport(report, observations) {
+  if (!observations.length) return null;
+  const client = requireClient();
+  const { data: userData, error: userError } = await client.auth.getUser();
+  if (userError) throw userError;
+  const user = userData.user;
+  const reportRow = {
+    user_id: user.id,
+    report_date: report.report_date,
+    lab_name: report.lab_name || null,
+    file_name: report.file_name || 'report.pdf',
+    parser_version: report.parser_version || 'pdf-v1',
+    extraction_method: report.extraction_method || null,
+    page_count: report.pages || null,
+  };
+  const { data: insertedReport, error: reportError } = await client
+    .from('health_reports')
+    .insert(reportRow)
+    .select('*')
+    .single();
+  if (reportError) throw reportError;
+  const rows = observations.map(row => ({
+    user_id: user.id,
+    report_id: insertedReport.id,
+    observed_on: row.observed_on || report.report_date,
+    biomarker_key: row.biomarker_key,
+    biomarker_name: row.biomarker_name,
+    value: row.value,
+    unit: row.unit || null,
+    ref_low: row.ref_low == null ? null : row.ref_low,
+    ref_high: row.ref_high == null ? null : row.ref_high,
+    flag: row.flag || 'unknown',
+    source_text: row.source_text || null,
+  }));
+  const { data, error } = await client.from('biomarker_observations').insert(rows).select('*');
+  if (error) throw error;
+  return { report: insertedReport, observations: data || [] };
+}
+
 window.VitalsCloud = {
   enabled,
   signInWithGoogle,
@@ -145,4 +188,5 @@ window.VitalsCloud = {
   upsertBodyMeasurement,
   deleteBodyMeasurement,
   upsertDailySummaries,
+  createHealthReport,
 };
