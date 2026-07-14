@@ -144,6 +144,7 @@ async function createHealthReport(report, observations) {
   const { data: userData, error: userError } = await client.auth.getUser();
   if (userError) throw userError;
   const user = userData.user;
+  if (!user) throw new Error('Sign in again before saving this report.');
   const reportRow = {
     user_id: user.id,
     report_date: report.report_date,
@@ -158,7 +159,7 @@ async function createHealthReport(report, observations) {
     .insert(reportRow)
     .select('*')
     .single();
-  if (reportError) throw reportError;
+  if (reportError) throw new Error(`Could not save health report metadata: ${reportError.message}`);
   const rows = observations.map(row => ({
     user_id: user.id,
     report_id: insertedReport.id,
@@ -173,7 +174,11 @@ async function createHealthReport(report, observations) {
     source_text: row.source_text || null,
   }));
   const { data, error } = await client.from('biomarker_observations').insert(rows).select('*');
-  if (error) throw error;
+    if (error) {
+      const { error: rollbackError } = await client.from('health_reports').delete().eq('id', insertedReport.id);
+      const rollbackNote = rollbackError ? ` Cleanup also failed: ${rollbackError.message}` : '';
+      throw new Error(`Could not save biomarker values: ${error.message}.${rollbackNote}`);
+    }
   return { report: insertedReport, observations: data || [] };
 }
 
